@@ -1,0 +1,9 @@
+include(${CMAKE_CURRENT_LIST_DIR}/Default.cmake)
+
+find_program(CMAKE_C_COMPILER NAMES ${PLATFORM}-gcc REQUIRED)
+find_program(CMAKE_LINKER NAMES ${PLATFORM}-ld REQUIRED)
+find_program(CMAKE_AR NAMES ${PLATFORM}-gcc-ar REQUIRED)
+find_program(CMAKE_RANLIB NAMES ${PLATFORM}-gcc-ranlib REQUIRED)
+find_program(CMAKE_NM NAMES ${PLATFORM}-gcc-nm REQUIRED)
+
+set(CMAKE_LINKER_TYPE BFD)

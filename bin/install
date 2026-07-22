@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+
+USAGE="Usage:
+    install -h|--help
+    install --mode <mode> [--clean] [--target <triple>] [--prefix <prefix>]
+
+Options:
+    -h | --help         Prints this help message
+    --mode <mode>       Installs the artifacts of <mode> mode
+    --prefix <path>     The root location for the installed artifacts
+    --clean             Uninstalls currently installed artifacts
+"
+
+ARGS=$(getopt -o "h" -l "mode:,prefix:,target:,clean,help" -n "$0" -- "$@")
+
+########################################
+
+INFO="\e[36mINFO:\e[0m "
+ERROR="\e[31mERROR:\e[0m "
+WARN="\e[35mWARNING:\e[0m "
+
+########################################
+
+if [ $? -ne 0 ]; then
+    echo -e "${ERROR}Unable to parse command line arguments" >&2
+    exit 1
+fi
+
+eval set -- "$ARGS"
+
+########################################
+
+if [ ! -d ".build" ]; then
+    echo -e "${ERROR}No built artifacts were found" >&2
+    exit 1
+fi
+
+if [ ! -f ".build/configurations.conf" ]; then
+    echo -e "${ERROR}Unable to find mode configurations. Please reapir with ${0//package/build} --repair" >&2
+fi
+
+########################################
+
+declare -A TARGETS
+declare -A MODES
+
+for target in $(find ".build" -mindepth 1 -maxdepth 1 -type d); do
+    TARGETS[${target##.build/}]=".build/$target"
+done
+unset target
+
+for mode in $(cat .build/configurations.conf | tr '=' ' ' | awk '{print $1}'); do
+    MODES["$(echo $mode | tr '[:upper:]' '[:lower:]')"]="$mode"
+done
+unset mode
+
+########################################
+
+declare -A targets
+
+#######################################
+
+while true; do
+    case "$1" in
+        -h|--help){
+            echo "$USAGE"
+            exit 0
+        } ;;
+
+        --target){
+            if [ -z "${TARGETS[$2]}" ]; then
+                available_targets=""
+                for target in ${!TARGETS[@]}; do
+                    if [ -z "$available_modes" ]; then
+                        available_targets="\t$target"
+                    else
+                        available_targets="$available_targets\n\t${target}"
+                    fi
+                done
+
+                echo -e "${ERROR}Unknown target '$2'. Expected one of\n$available_targets" >&2
+                exit 1
+            fi
+
+            if [ -z "${targets[$2]}" ]; then
+                targets[$2]=1
+            fi
+
+            shift 2
+        } ;;
+
+        --mode){
+            if [ -z "${MODES[$2]}" ]; then
+                available_modes=""
+                for mode in ${!MODES[@]}; do
+                    if [ -z "$available_modes" ]; then
+                        available_modes="\t$mode"
+                    else
+                        available_modes="$available_modes\n\t${mode}"
+                    fi
+                done
+
+                echo -e "${ERROR}Unknown mode '$2'. Expected one of:\n$available_modes" >&2
+                exit 1
+            fi
+
+            if [ ! -f ".build/configurations.conf" ]; then
+                echo -e "${ERROR}Unable to retrieve modes configuration. Please run 'bin/build --repair'" >&2
+                exit 1
+            fi
+
+            mode="$2"
+            config="$(cat ".build/configurations.conf" | grep -i "^$mode *=.*$" | tr '=;' ' ' | awk '{print $2}')"
+
+            if [ -z "$config" ]; then
+                echo -e "${ERROR}Unknown configuration for mode '$mode'" >&2
+                exit 1
+            fi
+
+            shift 2
+        } ;;
+
+        --prefix){
+            prefix="$2"
+
+            shift 2
+        } ;;
+
+        --clean){
+            clean=1
+
+            shift 1
+        } ;;
+
+        *){
+            break
+        } ;;
+    esac
+done
+
+########################################
+
+if [ -z "${!targets[*]}" ]; then
+    targets["$(cc -dumpmachine)"]=1
+fi
+
+if [ -z "$clean" ]; then
+    clean=0
+fi
+
+if [ -z "$mode" -a "$clean" -ne 1 ]; then
+    available_modes=""
+    for mode in ${!MODES[@]}; do
+        if [ -z "$available_modes" ]; then
+            available_modes="\t$mode"
+        else
+            available_modes="$available_modes\n\t${mode}"
+        fi
+    done
+
+    echo -e "${ERROR}Must specify one of the following modes:\n$available_modes"
+    exit 1
+fi
+
+########################################
+
+for target in ${!targets[@]}; do
+    if [ ! -d ".build/$target" ]; then
+        echo -e "${ERROR}Target '$target' was not built. Please build it before installing" >&2
+        exit 1
+    fi
+
+    if [ "$clean" -eq 1 ]; then
+        artifacts="$(cat ".build/$target/install_manifest.txt" 2>/dev/null)"
+
+        for artifact in $artifacts; do
+            if [ ! -f "$artifact" ]; then
+                continue
+            fi
+
+            echo -e "${INFO}Removing ${artifact}"
+            rm "$artifact"
+        done
+
+        continue
+    fi
+    
+    if [ -z "$prefix" ]; then
+        cmake --install ".build/$target" --config "$config"
+    else
+        cmake --install ".build/$target" --config "$config" --prefix "$prefix"
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo -e "${ERROR}Failure when installing '$target' artifacts" >&2
+        exit $?
+    fi
+done

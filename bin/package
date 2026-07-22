@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+
+# package --mode <mode> [--target <triple>] [--aggregate]
+
+USAGE="Usage:
+    $0 -h|--help
+    $0 --mode <mode> [--clean] [--target <triple>] [--aggregate] [--prefix <path>]
+
+Options:
+    -h | --help         Prints this help message
+    --mode <mode>       Packages on <mode> mode
+    --target <triple>   Packages the <triple> target system
+    --prefix <path>     The directory to save packaged archives
+    --aggregate         Packages every target system
+    --clean             Removes saved archive files on <prefix>
+"
+
+ARGS=$(getopt -o "h" -l "mode:,target:,prefix:,aggregate,clean" -n "$0" -- "$@")
+
+########################################
+
+INFO="\e[36mINFO:\e[0m "
+ERROR="\e[31mERROR:\e[0m "
+WARN="\e[35mWARNING:\e[0m "
+
+########################################
+
+if [ $? -ne 0 ]; then
+    echo -e "${ERROR}Unable to parse command line arguments" >&2
+    exit 1
+fi
+
+eval set -- "$ARGS"
+
+########################################
+
+if [ ! -d ".build" ]; then
+    echo -e "${ERROR}No built artifacts were found. Please build with ${0//package/build}" >&2
+    exit 1
+fi
+
+if [ ! -f ".build/configurations.conf" ]; then
+    echo -e "${ERROR}Unable to find mode configurations. Please reapir with ${0//package/build} --repair" >&2
+    exit 1
+fi
+
+declare -A MODES
+declare -A TARGETS
+
+for target in $(find ".build" -mindepth 1 -maxdepth 1 -type d); do
+    TARGETS[${target##.build/}]=".build/$target"
+done
+unset target
+
+for mode in $(cat .build/configurations.conf | tr '=' ' ' | awk '{print $1}'); do
+    MODES["$(echo $mode | tr '[:upper:]' '[:lower:]')"]="$mode"
+done
+unset mode
+
+########################################
+
+declare -A targets
+
+########################################
+
+while true; do
+    case "$1" in
+        -h|--help){
+            echo "$USAGE"
+            exit 0
+        } ;;
+
+        --prefix){
+            prefix="$(realpath "${2/#~/$HOME}")"
+            
+            shift 2
+        } ;;
+
+        --target){
+            if [ -z "${TARGETS[$2]}" ]; then
+                available_targets=""
+                for target in ${!TARGETS[@]}; do
+                    if [ -z "$available_modes" ]; then
+                        available_targets="\t$target"
+                    else
+                        available_targets="$available_targets\n\t${target}"
+                    fi
+                done
+
+                echo -e "${ERROR}Unknown target '$2'. Expected one of\n$available_targets" >&2
+                exit 1
+            fi
+
+            if [ -z "${targets[$2]}" ]; then
+                targets[$2]=1
+            fi
+
+            shift 2
+        } ;;
+
+        --mode){
+            if [ -z "${MODES[$2]}" ]; then
+                available_modes=""
+                for mode in ${!MODES[@]}; do
+                    if [ -z "$available_modes" ]; then
+                        available_modes="\t$mode"
+                    else
+                        available_modes="$available_modes\n\t${mode}"
+                    fi
+                done
+
+                echo -e "${ERROR}Unknown mode '$2'. Expected one of:\n$available_modes" >&2
+                exit 1
+            fi
+
+            if [ ! -f ".build/configurations.conf" ]; then
+                echo -e "${ERROR}Unable to retrieve modes configuration. Please run 'bin/build --repair'" >&2
+                exit 1
+            fi
+
+            mode="$2"
+            config="$(cat ".build/configurations.conf" | grep -i "^$mode *=.*$" | tr '=;' ' ' | awk '{print $2}')"
+
+            if [ -z "$config" ]; then
+                echo -e "${ERROR}Unknown configuration for mode '$mode'" >&2
+                exit 1
+            fi
+
+            shift 2
+        } ;;
+
+        --aggregate){
+            for target in ${!TARGETS[@]}; do
+                targets[$target]=1
+            done
+
+            shift 1
+        } ;;
+
+        --clean){
+            clean=1
+
+            shift 1
+        } ;;
+
+        *){
+            break
+        } ;;
+    esac
+done
+
+########################################
+
+if [ -z "${!targets[*]}" ]; then
+    targets["$(cc -dumpmachine)"]=1
+fi
+
+if [ -z "$clean" ]; then
+    clean=0
+fi
+
+if [ -z "$mode" -a "$clean" -ne 1 ]; then
+    available_modes=""
+    for mode in ${!MODES[@]}; do
+        if [ -z "$available_modes" ]; then
+            available_modes="\t$mode"
+        else
+            available_modes="$available_modes\n\t${mode}"
+        fi
+    done
+
+    echo -e "${ERROR}Must specify one of the following modes:\n$available_modes"
+    exit 1
+fi
+
+if [ -z "$prefix" ]; then
+    prefix="$PWD/.packages"
+fi
+
+if [ ! -d "$prefix" ]; then
+    mkdir -p "$prefix"
+fi
+
+########################################
+
+for target in ${!targets[@]}; do
+    if [ ! -d ".build/$target" ]; then
+        echo -e "${ERROR}Target '$target' was not built. Please build it before installing" >&2
+        exit 1
+    fi
+
+    if [ "$clean" -eq 1 ]; then
+        if [ ! -d ".build/$target/packages" ]; then
+            continue
+        fi
+
+        artifacts="$(
+            find ".build/$target/packages" -mindepth 1 -maxdepth 1 |
+            sed "s:.build/$target/packages/::"
+        )"
+
+        for artifact in $artifacts; do
+            if [ ! -f "$prefix/$artifact" -a ! -d "$prefix/$artifact" ]; then
+                continue
+            fi
+
+            echo -e "${INFO}Removing $prefix/${artifact}"
+            rm -r "$prefix/$artifact"
+        done
+
+        continue
+    fi
+
+    cd ".build/$target"
+    echo -e "${INFO}Packaging $target"
+    cpack -C "$config" -B "packages" 1>/dev/null
+
+    if [ $? -ne 0 ]; then
+        echo -e "${ERROR}Failure when packaging '$target' artifacts" >&2
+        cd ../..
+        exit $?
+    fi
+
+    cd ../..
+
+    for archive in $(find ".build/$target/packages" -maxdepth 1 -type f); do
+        if [ ! "$archive" -nt "$prefix/${archive##.build/$target/packages/}" ]; then
+            continue
+        fi
+
+        echo -e "${INFO}Saving archive at $prefix/${archive##.build/$target/packages/}"
+        cp "$archive" "$prefix"
+    done
+done

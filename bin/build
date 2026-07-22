@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+
+USAGE="Usage:
+    build -h|--help
+    build --mode <mode> [--llvm|--gnu|--msvc] [--aggregate] [--repair] [--purge] [--clean] [--target <triple>]
+
+Options:
+    -h                  Prints this help message
+    --mode <mode>       Builds on <mode> mode
+    --target <triple>   Builds for the <triple> target system
+    --aggregate         Builds all target systems available [SLOW]
+    --clean             Cleans the build artifacts and exits
+    --purge             Cleans *everything* under the root build tree
+    --repar             Repairs the current configuration
+    --llvm              Uses the LLVM toolchain
+    --gnu               Uses the GNU toolchain
+    --msvc              Uses the MSVC toolchain
+"
+
+ARGS=$(
+    getopt -o "h" -l "target:,mode:,aggregate,llvm,gnu,msvc,repair,clean,purge,help" -n "$0" -- "$@"
+)
+
+########################################
+
+INFO="\e[36mINFO:\e[0m "
+ERROR="\e[31mERROR:\e[0m "
+WARN="\e[35mWARNING: \e[0m"
+
+########################################
+
+if [ $? -ne 0 ]; then
+    echo "${ERROR}Unable to parse commanad line arguments" >&2
+    exit 1
+fi
+
+eval set -- "${ARGS}"
+
+########################################
+
+declare -A MODES
+declare -A TARGETS
+
+for mode in $(find cmake/modes -mindepth 1 -maxdepth 1 -name '*.cmake'); do
+    name="${mode##cmake/modes/}"
+    name="${name%%.cmake}"
+    name="$(echo $name | tr '[:upper:]' '[:lower:]')"
+
+    MODES[$name]="$mode"
+done
+unset mode
+unset name
+
+for target in $(find cmake/toolchain -mindepth 1 -maxdepth 1 -type d); do
+    TARGETS[${target##cmake/toolchain/}]=1
+done
+unset target
+
+if [ ! -f cmake/config/configurations.conf ]; then
+    echo -e "${ERROR}Please, write a configurations.conf inside cmake/config, as it provides the mappings between\nmodes and configurations"
+    exit 1
+fi
+
+if [ ! -f ".build/configurations.conf" ]; then
+    cp cmake/config/configurations.conf .build/configurations.conf
+fi
+
+if [ "cmake/config/configurations.conf" -nt ".build/configurations.conf"  ]; then
+    echo -e "${WARN}Updating mode configurations"
+    cp cmake/config/configurations.conf .build/configurations.conf
+fi
+
+CONFIGS="$(cat cmake/config/configurations.conf | grep -i '^.*=.*;$' | tr '=;' ' ' | awk '{print $2}')"
+
+################################################
+############# Default values ###################
+################################################
+
+mode=""
+declare -A targets=()
+
+if [ "$(uname -s)" = "Linux" ]; then
+    toolchain="GNU"
+elif [ "$(uname -s)" =~ "BSD" ]; then
+    toolchain="LLVM"
+elif [ "$(uname -s)" =~ "Darwin" ]; then
+    toolchain="LLVM"
+else
+    toolchan="GNU"
+fi
+
+################################################
+################################################
+################################################
+
+while true; do
+    case $1 in
+        -h|--help){
+            echo "$USAGE"
+            exit 0
+        } ;;
+
+        --clean){
+            clean=1
+
+            shift 1
+        } ;;
+
+        --repair){
+            repair=1
+            
+            shift 1
+        } ;;
+
+        --purge){
+            purge=1
+
+            shift 1
+        } ;;
+
+        --target){
+            if [ -z "${TARGETS[$2]}" ]; then
+                available_targets=""
+                for target in ${!TARGETS[@]}; do
+                    if [ -z "$available_targets" ]; then
+                        available_targets="\t$target"
+                    else
+                        available_targets="$available_targets\n\t${target}"
+                    fi
+                done
+
+                echo -e "${ERROR}Unknown target '$2'. Expected one of:\n$available_targets"
+                exit 1;
+            fi
+
+            if [ -z "${targets[$2]}" ]; then
+                targets[$2]=1
+            fi
+
+            shift 2
+        } ;;
+        
+        --mode){
+            if [ -z "${MODES[$2]}" ]; then
+                available_modes=""
+                for mode in ${!MODES[@]}; do
+                    if [ -z "$available_modes" ]; then
+                        available_modes="\t$mode"
+                    else
+                        available_modes="$available_modes\n\t${mode}"
+                    fi
+                done
+
+                echo -e "${ERROR}Invalid mode. Must be one of:\n$available_modes"
+                exit 1
+            fi
+
+            mode="$2"
+            config="$(
+                cat .build/configurations.conf |
+                grep -i "^$mode *=.*;$" |
+                tr '=;' ' ' |
+                awk '{print $2}'
+            )"
+
+            if [ -z "$config" ]; then
+                echo -e "${ERROR}Unknown configuration for mode '$mode'"
+                exit 1
+            fi
+
+            shift 2
+        } ;;
+
+        --aggregate){
+            targets=(${!TARGETS[@]}) 
+            shift 1
+        } ;;
+
+        --gnu){
+            toolchain="GNU"
+
+            shift 1
+        } ;;
+
+        --llvm){
+            toolchain="LLVM"
+
+            shift 1
+        } ;;
+
+        --msvc){
+            toolchain="MSVC"
+
+            shift 1
+        } ;;
+
+        *) break
+    esac
+done
+
+if [ -z "$clean" ]; then
+    clean=0
+fi
+
+if [ -z "$repair" ]; then
+    repair=0
+fi
+
+if [ -z "$purge" ]; then
+    purge=0
+fi
+
+if [ "$purge" -eq 1 ]; then
+    echo -e "${WARN}Purging build artifacts"
+    rm -r .build/*
+
+    if [ $? -ne 0 ]; then
+        echo -e "${ERROR}Failure on purging" >&2
+    fi
+
+    exit 0
+fi
+
+if [ -z "$mode" -a "$clean" -ne 1 ]; then
+    available_modes=""
+    for mode in ${!MODES[@]}; do
+        if [ -z "$available_modes" ]; then
+            available_modes="\t$mode"
+        else
+            available_modes="$available_modes\n\t${mode}"
+        fi
+    done
+
+    echo -e "${ERROR}Must specify one of the following modes:\n$available_modes"
+    exit 1
+fi
+
+if [ -z "${!targets[*]}" ]; then
+    targets[$(cc -dumpmachine)]=1
+fi
+
+if [ ! -z "$mode" ]; then
+    CONFIGURE_COMMAND=(
+        cmake -C "$PWD/${MODES[$mode]}" -G 'Ninja Multi-Config' -S .
+        -DCMAKE_INSTALL_PREFIX=".modules" -DCMAKE_CONFIGURATION_TYPES="$(echo $CONFIGS | tr ' ' ';')"
+    )
+fi
+
+for target in ${!targets[@]}; do
+    CONFIGURE_COMMAND+=(
+        -B ".build/$target"
+        -DCMAKE_TOOLCHAIN_FILE="cmake/toolchain/$target/$toolchain.cmake" 
+        -DCMAKE_MODULE_PATH="$PWD/cmake/modules;$PWD/cmake/toolchain/$target"
+    )
+
+    if [ -f ".build/$target/toolchain.conf" ]; then
+        current_toolchain="$(cat ".build/$target/toolchain.conf")"
+    fi
+
+    if [ "$clean" -eq 1 ]; then
+        echo -e "${INFO}Removing $target artifacts"
+
+        if [ ! -d ".build/$target" ]; then
+            continue
+        fi
+
+        cd ".build/$target"
+        ninja clean
+        cd ../..
+        
+        if [ -f ".build/$target/toolchain.conf" ]; then
+            rm ".build/$target/toolchain.conf"
+        fi
+
+        continue
+    fi
+
+    if [ -d ".build/$target" -a "$current_toolchain" != "$toolchain" ]; then
+        repair=1
+    fi
+
+    if [ "$repair" -eq 1 ]; then
+        echo -e "${WARN}Repairing $target build tree"
+        CONFIGURE_COMMAND+=(--fresh)
+        cp "cmake/config/configurations.conf" ".build"
+    fi
+
+    if [ ! -d ".build/$target" -o "$repair" -eq 1 ]; then
+        "${CONFIGURE_COMMAND[@]}"
+
+        if [ $? -ne 0 ]; then
+            exit $?
+        fi
+
+        echo "$toolchain" > ".build/$target/toolchain.conf"
+    fi
+
+    echo -e "${INFO}Building for $target"
+    cmake --build ".build/$target" --config "$config" -j$(nproc)
+
+    if [ $? -ne 0 ]; then
+        exit $?
+    fi
+done
