@@ -61,6 +61,10 @@ if [ ! -f cmake/config/configurations.conf ]; then
     exit 1
 fi
 
+if [ ! -d ".build" ]; then
+    mkdir .build
+fi
+
 if [ ! -f ".build/configurations.conf" ]; then
     cp cmake/config/configurations.conf .build/configurations.conf
 fi
@@ -70,7 +74,7 @@ if [ "cmake/config/configurations.conf" -nt ".build/configurations.conf"  ]; the
     cp cmake/config/configurations.conf .build/configurations.conf
 fi
 
-CONFIGS="$(cat cmake/config/configurations.conf | grep -i '^.*=.*;$' | tr '=;' ' ' | awk '{print $2}')"
+CONFIGS="$(cat cmake/config/configurations.conf | grep -i '^ *.*=.*$' | tr '=;' ' ' | awk '{print $2}')"
 
 ################################################
 ############# Default values ###################
@@ -158,7 +162,7 @@ while true; do
             mode="$2"
             config="$(
                 cat .build/configurations.conf |
-                grep -i "^$mode *=.*;$" |
+                grep -i "^ *$mode *=.*$" |
                 tr '=;' ' ' |
                 awk '{print $2}'
             )"
@@ -246,16 +250,14 @@ if [ ! -z "$mode" ]; then
     )
 fi
 
+stderr_file="$(mktemp cmake-build.XXXXXX)"
+
 for target in ${!targets[@]}; do
     CONFIGURE_COMMAND+=(
         -B ".build/$target"
         -DCMAKE_TOOLCHAIN_FILE="cmake/toolchain/$target/$toolchain.cmake" 
         -DCMAKE_MODULE_PATH="$PWD/cmake/modules;$PWD/cmake/toolchain/$target"
     )
-
-    if [ -f ".build/$target/toolchain.conf" ]; then
-        current_toolchain="$(cat ".build/$target/toolchain.conf")"
-    fi
 
     if [ "$clean" -eq 1 ]; then
         echo -e "${INFO}Removing $target artifacts"
@@ -275,6 +277,26 @@ for target in ${!targets[@]}; do
         continue
     fi
 
+    if [ -f "cmake/config/options.conf" ]; then    
+        options=($(
+            awk -F'=' "/^\[$target\]/{f=1;next} /^\[/{f=0} f && NF{print}" "cmake/config/options.conf" |
+            tr '=' ' '
+        ))
+
+        for (( i=0 ; i < "${#options[@]}"; i++ )); do
+            name="${options[$i]}"
+            value="${options[$((i+1))]}"
+
+            CONFIGURE_COMMAND+=("-D$name=\"$value\"")
+
+            (( i++ ))
+        done
+    fi
+
+    if [ -f ".build/$target/toolchain.conf" ]; then
+        current_toolchain="$(cat ".build/$target/toolchain.conf")"
+    fi
+
     if [ -d ".build/$target" -a "$current_toolchain" != "$toolchain" ]; then
         repair=1
     fi
@@ -286,9 +308,11 @@ for target in ${!targets[@]}; do
     fi
 
     if [ ! -d ".build/$target" -o "$repair" -eq 1 ]; then
-        "${CONFIGURE_COMMAND[@]}"
+        "${CONFIGURE_COMMAND[@]}" 2>"$stderr_file"
 
         if [ $? -ne 0 ]; then
+            echo -e "${ERROR}$(cat "$stderr_file")" >&2
+            rm "$stderr_file"
             exit $?
         fi
 
@@ -296,9 +320,13 @@ for target in ${!targets[@]}; do
     fi
 
     echo -e "${INFO}Building for $target"
-    cmake --build ".build/$target" --config "$config" -j$(nproc)
+    cmake --build ".build/$target" --config "$config" -j$(nproc) 2>"$stderr_file"
 
     if [ $? -ne 0 ]; then
+        echo -e "${ERROR}$(cat "$stderr_file")"
+        rm "$stderr_file"
         exit $?
     fi
+
+    rm "$stderr_file"
 done
